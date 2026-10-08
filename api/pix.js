@@ -1,208 +1,161 @@
-function PaymentPage() {
-  const saved = useMemo(() => {
-    try { return JSON.parse(sessionStorage.getItem('recargaData') || '{}'); }
-    catch { return {}; }
-  }, []);
+export const config = {
+  runtime: 'nodejs',
+  maxDuration: 30,
+};
 
-  const operator = operators[saved.operator] || operators.claro;
-  const amount = Number(
-    new URLSearchParams(window.location.search).get('valor') || saved.amount || 40
-  );
-  const selectedBonus = saved.bonus || planBonus(amount);
+const BASE = process.env.SHARPIFY_GATEWAY_URL || 'https://sharpify-pay.com';
+const PATH = '/api/v1/gateway/payment/create-paymnet';
 
-  const [pix, setPix] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [copied, setCopied] = useState(false);
-  const [paymentStatus, setPaymentStatus] = useState('PENDING');
+function json(res, status, body) {
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  return res.status(status).send(JSON.stringify(body));
+}
 
-  // cria o Pix (uma única vez por paymentLinkId salvo)
-  useEffect(() => {
-    if (!saved.phone || !saved.operator) { go('/'); return; }
-
-    // reaproveita Pix já criado nesta sessão
-    const cached = sessionStorage.getItem('pixCache');
-    if (cached) {
-      try {
-        const parsed = JSON.parse(cached);
-        if (parsed?.paymentData?.copyPaste && Number(parsed.amountInput) === amount) {
-          setPix(parsed);
-          setPaymentStatus(parsed.status || 'PENDING');
-          setLoading(false);
-          return;
-        }
-      } catch { /* ignore */ }
+export default async function handler(req, res) {
+  try {
+    if (req.method !== 'POST') {
+      return json(res, 405, { success: false, message: 'Método não permitido' });
     }
 
-    let cancelled = false;
-    fetch('/api/pix', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        amount,
-        product_name: `Recarga ${operator.name} ${money(amount)}`,
-        metadata: { telefone: onlyDigits(saved.phone), operadora: operator.name },
-      }),
-    })
-      .then(async r => {
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok || !d.success) {
-          // extrai mensagem legível, seja string ou objeto
-          const msg =
-            (typeof d.message === 'string' && d.message) ||
-            d.message?.message ||
-            d.debug?.response?.message?.message ||
-            d.debug?.response?.message ||
-            d.debug?.response?.error ||
-            `Falha ao gerar Pix (HTTP ${r.status}).`;
-          const err = new Error(msg);
-          err.debug = d.debug;
-          throw err;
-        }
-        return d.data;
-      })
-      .then(data => {
-        if (cancelled) return;
-        setPix({ ...data, amountInput: amount });
-        setPaymentStatus(data.status || 'PENDING');
-        sessionStorage.setItem('pixCache', JSON.stringify({ ...data, amountInput: amount }));
-      })
-      .catch(e => {
-        if (cancelled) return;
-        console.error('[/api/pix] erro:', e, e?.debug);
-        setError(e?.message || 'Erro desconhecido ao gerar Pix.');
-      })
-      .finally(() => { if (!cancelled) setLoading(false); });
-
-    return () => { cancelled = true; };
-  }, []);
-
-  // desenha QR code
-  useEffect(() => {
-    if (pix?.paymentData?.copyPaste) {
-      QRCode.toCanvas(
-        document.getElementById('qr-code'),
-        pix.paymentData.copyPaste,
-        { width: 220, margin: 1 }
-      ).catch(() => {});
+    if (!process.env.SHARPIFY_CLIENT_ID || !process.env.SHARPIFY_CLIENT_SECRET) {
+      return json(res, 500, {
+        success: false,
+        message: 'Configure SHARPIFY_CLIENT_ID e SHARPIFY_CLIENT_SECRET na Vercel.',
+      });
     }
-  }, [pix]);
 
-  // polling de status
-  useEffect(() => {
-    if (!pix?.paymentLinkId) return;
-    if (paymentStatus === 'APPROVED' || paymentStatus === 'CANCELLED') return;
+    let body = req.body;
+    if (typeof body === 'string') {
+      try { body = JSON.parse(body); } catch { body = {}; }
+    }
+    body = body || {};
 
-    let tries = 0;
-    const MAX = 120; // ~10 min
-    const t = setInterval(async () => {
-      tries++;
-      try {
-        const r = await fetch(`/api/status?paymentLinkId=${encodeURIComponent(pix.paymentLinkId)}`);
-        const d = await r.json();
-        if (r.ok && d?.success) {
-          setPaymentStatus(d.data.status || 'PENDING');
-        }
-      } catch { /* silencioso */ }
-      if (tries >= MAX) clearInterval(t);
-    }, 5000);
+    const amount = Number(body.amount);
+    if (!Number.isFinite(amount) || amount < 0.01 || amount > 1000) {
+      return json(res, 400, {
+        success: false,
+        message: 'amount deve ser um número entre 0,01 e 1.000.',
+      });
+    }
 
-    return () => clearInterval(t);
-  }, [pix?.paymentLinkId, paymentStatus]);
+    const meta = body.metadata && typeof body.metadata === 'object' ? body.metadata : {};
+    const op = String(meta.operadora || '').trim();
+    const phone = String(meta.telefone || '').replace(/\D/g, '');
 
-  const copy = async () => {
-    if (!pix?.paymentData?.copyPaste) return;
-    await navigator.clipboard.writeText(pix.paymentData.copyPaste);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
+    const payload = {
+      name: String(body.product_name || `Recarga${op ? ` ${op}` : ''}`).slice(0, 120),
+      description: `Recarga de celular${op ? ` - ${op}` : ''}${phone ? ` - ${phone}` : ''}`.slice(0, 500),
+      amount: Number(amount.toFixed(2)),
+      gatewayMethod: 'PIX',
+    };
 
-  const retry = () => {
-    sessionStorage.removeItem('pixCache');
-    window.location.reload();
-  };
+    if (process.env.SHARPIFY_WEBHOOK_URL) {
+      payload.webhook = { callbackURL: process.env.SHARPIFY_WEBHOOK_URL };
+      if (process.env.SHARPIFY_WEBHOOK_SECRET) {
+        payload.webhook.headers = [
+          { key: 'x-webhook-secret', value: process.env.SHARPIFY_WEBHOOK_SECRET },
+        ];
+      }
+    }
 
-  const statusMessage =
-    paymentStatus === 'APPROVED' ? 'Pagamento confirmado! Sua recarga foi aprovada.' :
-    paymentStatus === 'CANCELLED' ? 'Este pagamento foi cancelado. Gere um novo Pix para continuar.' :
-    'Aguardando confirmação do pagamento';
+    if (typeof fetch !== 'function') {
+      return json(res, 500, {
+        success: false,
+        message: 'Node sem fetch global. Defina "engines": { "node": ">=18.0.0" } no package.json e redeploy.',
+      });
+    }
 
-  return (
-    <>
-      <Header />
-      <main className="payment-page">
-        <button className="back" onClick={() => go(`/recarga-${operator.slug}`)}>
-          ← Voltar e editar
-        </button>
-        <div className="payment-layout">
-          <section className="payment-card">
-            <div className="payment-header">
-              <span className="eyebrow">ÚLTIMO PASSO</span>
-              <h1>Pague com Pix.</h1>
-              <p>Escaneie o QR Code ou copie o código para concluir sua recarga.</p>
-            </div>
+    const url = `${BASE}${PATH}`;
+    console.log('[SHARPIFY /api/pix] REQ', { url, payload });
 
-            {loading && (
-              <div className="loading">
-                <span className="spinner" /> Gerando seu código Pix...
-              </div>
-            )}
+    let r, text;
+    try {
+      r = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          'x-sharpify-client-id': process.env.SHARPIFY_CLIENT_ID,
+          'x-sharpify-client-secret': process.env.SHARPIFY_CLIENT_SECRET,
+        },
+        body: JSON.stringify(payload),
+      });
+      text = await r.text();
+    } catch (netErr) {
+      console.error('[SHARPIFY /api/pix] NET ERROR', netErr);
+      return json(res, 502, {
+        success: false,
+        message: 'Falha de rede ao chamar a Sharpify.',
+        debug: { url, error: String(netErr?.message || netErr) },
+      });
+    }
 
-            {error && (
-              <div className="api-error">
-                <strong>Não foi possível gerar o Pix</strong>
-                <p style={{
-                  whiteSpace: 'pre-wrap',
-                  wordBreak: 'break-word',
-                  fontFamily: 'monospace',
-                  fontSize: 12,
-                  textAlign: 'left',
-                }}>{error}</p>
-                <small>Verifique SHARPIFY_CLIENT_ID, SHARPIFY_CLIENT_SECRET e a permissão CREATE_PAYMENT_LINK na Vercel. Abra /api/diag para diagnóstico.</small>
-                <button className="secondary" onClick={retry}>Tentar novamente</button>
-              </div>
-            )}
+    let raw;
+    try { raw = JSON.parse(text); } catch { raw = { _rawText: text }; }
 
-            {pix && !error && (
-              <>
-                <div className="qr-wrap">
-                  <canvas id="qr-code" />
-                  <span>Abra o app do seu banco<br />e escaneie o código.</span>
-                </div>
-                <div className="pix-copy">
-                  <label>Código Pix copia e cola</label>
-                  <div>
-                    <input readOnly value={pix.paymentData.copyPaste} />
-                    <button onClick={copy}>{copied ? 'Copiado!' : 'Copiar'}</button>
-                  </div>
-                </div>
-                <div className={`waiting ${paymentStatus === 'APPROVED' ? 'success' : paymentStatus === 'CANCELLED' ? 'error' : ''}`}>
-                  {paymentStatus === 'APPROVED' ? '✓' : paymentStatus === 'CANCELLED' ? '!' : '◷'} {statusMessage}
-                </div>
-              </>
-            )}
-          </section>
+    console.log('[SHARPIFY /api/pix] RES', { status: r.status, raw });
 
-          <aside className="order-summary">
-            <span className="eyebrow">RESUMO</span>
-            <div className="summary-operator">
-              <img src={operator.logo} alt={operator.name} />
-              <div>
-                <strong>Recarga {operator.name}</strong>
-                <small>{saved.phone}</small>
-              </div>
-            </div>
-            <div className="summary-line"><span>Número</span><strong>{saved.phone}</strong></div>
-            <div className="summary-line"><span>Valor da recarga</span><strong>{money(amount)}</strong></div>
-            <div className="summary-line bonus-line"><span>Bônus</span><strong>+{selectedBonus.replace(' • 30 dias', '')}</strong></div>
-            <div className="summary-line"><span>Validade do bônus</span><strong>30 dias</strong></div>
-            <div className="summary-line"><span>Pagamento</span><strong>Pix</strong></div>
-            <hr />
-            <div className="summary-total"><span>Total</span><strong>{money(amount)}</strong></div>
-            <p>Confira o número e o valor antes de confirmar o pagamento.</p>
-          </aside>
-        </div>
-      </main>
-    </>
-  );
+    if (!r.ok) {
+      const msg =
+        (typeof raw?.message === 'string' && raw.message) ||
+        (typeof raw?.error === 'string' && raw.error) ||
+        raw?.message?.message ||
+        raw?.error?.message ||
+        `Sharpify respondeu ${r.status}.`;
+      return json(res, r.status || 502, {
+        success: false,
+        message: msg,
+        debug: { status: r.status, url, response: raw },
+      });
+    }
+
+    const link = raw?.data?.paymentLink || raw?.paymentLink || raw?.data || raw;
+    const payment = link?.payment || null;
+    const gd = payment?.gateway?.data || null;
+
+    const code =
+      gd?.code ||
+      gd?.payload ||
+      gd?.pixCopyPaste ||
+      payment?.pix?.code ||
+      raw?.data?.code ||
+      '';
+
+    const id = link?.id || raw?.paymentLinkId || raw?.id || null;
+
+    if (!id || !code) {
+      return json(res, 502, {
+        success: false,
+        message: 'Sharpify respondeu, mas o ID/código Pix não foram encontrados.',
+        debug: { status: r.status, url, response: raw },
+      });
+    }
+
+    return json(res, 200, {
+      success: true,
+      data: {
+        paymentLinkId: id,
+        status: link.status || 'PENDING',
+        paymentData: {
+          copyPaste: code,
+          qrCodeBase64: gd?.qrCodeBase64 || null,
+          qrCode: gd?.qrCode || null,
+          paymentLink: gd?.paymentLink || null,
+        },
+        transactionId: payment?.id || null,
+        amount: payment?.amount ?? link?.pricing?.total ?? amount,
+        amountDisplay: amount.toLocaleString('pt-BR', {
+          style: 'currency',
+          currency: 'BRL',
+        }),
+      },
+    });
+  } catch (fatal) {
+    console.error('[SHARPIFY /api/pix] FATAL', fatal);
+    return json(res, 500, {
+      success: false,
+      message: 'Erro interno na função /api/pix.',
+      debug: { error: String(fatal?.message || fatal) },
+    });
+  }
 }
