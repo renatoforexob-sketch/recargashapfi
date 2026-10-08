@@ -3,7 +3,18 @@ export const config = {
   maxDuration: 30,
 };
 
-const BASE = process.env.SHARPIFY_GATEWAY_URL || 'https://sharpify-pay.com';
+const PATH = '/api/v1/gateway/payment/get-payment';
+
+function normalizeBase(raw) {
+  let base = String(raw || 'https://sharpify-pay.com').trim().replace(/\/+$/, '');
+  base = base.replace(/\/api\/v1\/gateway\/payment\/[^/]+$/i, '');
+  base = base.replace(/\/api\/v1\/gateway$/i, '');
+  base = base.replace(/\/api\/v1$/i, '');
+  base = base.replace(/\/api$/i, '');
+  return base.replace(/\/+$/, '');
+}
+
+const BASE = normalizeBase(process.env.SHARPIFY_GATEWAY_URL);
 
 function json(res, status, body) {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -36,7 +47,8 @@ export default async function handler(req, res) {
       return json(res, 500, { success: false, message: 'Node sem fetch global.' });
     }
 
-    const url = `${BASE}/api/v1/gateway/payment/get-payment?paymentLinkId=${encodeURIComponent(id)}`;
+    const url = `${BASE}${PATH}?paymentLinkId=${encodeURIComponent(id)}`;
+    console.log('[SHARPIFY /api/status] REQ', { url });
 
     let r, text;
     try {
@@ -62,10 +74,16 @@ export default async function handler(req, res) {
     let raw;
     try { raw = JSON.parse(text); } catch { raw = { _rawText: text }; }
 
+    console.log('[SHARPIFY /api/status] RES', { status: r.status, raw });
+
     if (!r.ok) {
       return json(res, r.status || 502, {
         success: false,
-        message: raw?.message || raw?.error || 'Não foi possível consultar o pagamento.',
+        message:
+          (typeof raw?.message === 'string' && raw.message) ||
+          raw?.message?.message ||
+          raw?.error ||
+          'Não foi possível consultar o pagamento.',
         debug: { status: r.status, url, response: raw },
       });
     }
