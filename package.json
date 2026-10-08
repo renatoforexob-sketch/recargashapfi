@@ -3,6 +3,9 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
@@ -10,13 +13,13 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "latest",
     "qrcode": "latest",
     "react": "latest",
-    "react-dom": "latest",
-    "vite": "latest"
+    "react-dom": "latest"
   },
   "devDependencies": {
-    "typescript": "latest"
+    "@vitejs/plugin-react": "latest",
+    "typescript": "latest",
+    "vite": "latest"
   }
 }
