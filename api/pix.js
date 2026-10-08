@@ -3,8 +3,19 @@ export const config = {
   maxDuration: 30,
 };
 
-const BASE = process.env.SHARPIFY_GATEWAY_URL || 'https://sharpify-pay.com';
 const PATH = '/api/v1/gateway/payment/create-paymnet';
+
+function normalizeBase(raw) {
+  let base = String(raw || 'https://sharpify-pay.com').trim().replace(/\/+$/, '');
+  base = base.replace(/\/api\/v1\/gateway\/payment\/create-paymnet$/i, '');
+  base = base.replace(/\/api\/v1\/gateway\/payment$/i, '');
+  base = base.replace(/\/api\/v1\/gateway$/i, '');
+  base = base.replace(/\/api\/v1$/i, '');
+  base = base.replace(/\/api$/i, '');
+  return base.replace(/\/+$/, '');
+}
+
+const BASE = normalizeBase(process.env.SHARPIFY_GATEWAY_URL);
 
 function json(res, status, body) {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
